@@ -3,4 +3,4 @@ Utilities to support wall and room building.
 
 Description will be added eventually.
 
-Special thanks to Alex (@ByteArrayInputStream) to help me out with the math for this one.
+Special thanks to Alex (@ByteArrayInputStream) for helping me out with the math for this one.
