@@ -19,12 +19,12 @@ bl_info = {
     "name": "WallBuilder",
     "description": "Utilities to support wall and room building.",
     "author": "JackTheFoxOtter",
-    "version": (1, 0),
+    "version": (1, 1),
     "blender": (2, 90, 1),
     "location": "View3D > Object > WallBuilder",
     "warning": "",
-    "wiki_url": "",
-    "tracker_url": "",
+    "wiki_url": "https://github.com/JackTheFoxOtter/blender-wallbuilder",
+    "tracker_url": "https://github.com/JackTheFoxOtter/blender-wallbuilder/issues",
     "support": "COMMUNITY",
     "category": "Object",
 }
@@ -111,7 +111,7 @@ def get_corner_position(origin, edge1, edge2, wall_thickness):
     
     # Determine angle in between edges
     angle = get_signed_angle(dir1, dir2)
-    if abs(angle) < 0.00001:
+    if abs(angle) < 0.0001:
         # Edges are parallel
         orthogonal = Vector([dir1.y, -dir1.x, 0.0])
         return origin.co - orthogonal * wall_thickness
@@ -149,29 +149,33 @@ def generate_wall_mesh_data(reference_obj, mesh, wall_thickness=0.125, fill_rims
             
             if start_edge:
                 # Edge exists
-                corner_position = get_corner_position(start, edge, start_edge, wall_thickness)
-                new_verts.append(corner_position.to_3d().to_tuple())
+                corner_position = get_corner_position(start, edge, start_edge, wall_thickness).to_3d()
+                corner_position.z = start.co.z
+                new_verts.append(corner_position.to_tuple())
                 # Add corner to corner_vertices list to create corner caps later
                 corner_vertices.setdefault(start, []).append(corner_position)
             else:
                 # Edge doesn't exist -> end segment
                 direction = (edge.other_vert(start).co - start.co).normalized()
                 orthogonal = Vector([direction.y, -direction.x, 0.0])
-                corner_position = start.co + orthogonal * wall_thickness
-                new_verts.append(corner_position.to_3d().to_tuple())
+                corner_position = (start.co + orthogonal * wall_thickness).to_3d()
+                corner_position.z = start.co.z
+                new_verts.append(corner_position.to_tuple())
                 # Store index of added end vertex so we can close it later
                 end_vertex_indices.append(len(new_verts)-1)
             
             if end_edge:
                 # Edge exists
-                corner_position = get_corner_position(end, end_edge, edge, wall_thickness)
-                new_verts.append(corner_position.to_3d().to_tuple())
+                corner_position = get_corner_position(end, end_edge, edge, wall_thickness).to_3d()
+                corner_position.z = end.co.z
+                new_verts.append(corner_position.to_tuple())
             else:
                 # Edge doesn't exist -> end segment
                 direction = (end.co - edge.other_vert(end).co).normalized()
                 orthogonal = Vector([direction.y, -direction.x, 0.0])
-                corner_position = end.co + orthogonal * wall_thickness
-                new_verts.append(corner_position.to_3d().to_tuple())
+                corner_position = (end.co + orthogonal * wall_thickness).to_3d()
+                corner_position.z = end.co.z
+                new_verts.append(corner_position.to_tuple())
                 # Store index of added end vertex so we can close it later
                 end_vertex_indices.append(len(new_verts)-1)
         
@@ -213,7 +217,110 @@ def generate_wall_mesh_data(reference_obj, mesh, wall_thickness=0.125, fill_rims
         
     # Fill new mesh with generated mesh data
     mesh.from_pydata(new_verts, new_edges, new_faces)
+    # Free BMesh of reference object
+    bm.free()
+
+
+def select_loop_faces(loop):
+    """
+    Select all faces on the specified loop.
+    Returns a list of the selected faces in order.
+    Only works for quads!
+    """
+    faces = []
+    
+    while not loop.face.select:
+        # If radial loop links back here, we're boundary, thus done
+        if loop.link_loop_radial_next == loop:
+            break
         
+        # Remember and mark current face
+        loop.face.select = True
+        faces.append(loop.face)
+        
+        # Jump to adjacent face and walk two edges forward
+        loop = loop.link_loop_radial_next.link_loop_next.link_loop_next
+
+    return faces
+
+
+def get_loop_direction(loop):
+    """
+    Returns the direction of a given edge loop relative to the face it's connected to.
+    The direction is defined through the 2D angle of the v1 to v2, where v1 is the direction of the
+    loop's current edge to the opposite one on the same face, and v2 is the normal direction of the loops face.
+    Positive Angle -> 1.0, Negative Angle -> -1.0.
+    Only works for quads!
+    """
+    face = loop.face
+    edge1 = loop.edge
+    edge2 = loop.link_loop_next.link_loop_next.edge
+    
+    direction = edge2.verts[0].co - edge1.verts[0].co
+    angle = get_signed_angle(direction.to_2d(), face.normal.to_2d())
+    
+    return 1.0 if angle > 0 else -1.0
+
+    
+def get_horizontal_face_rings(bm):
+    """
+    Returns all face rings along walls (horizontal faces) for a given mesh object.
+    (Requires edit mode, probably)
+    """
+    face_rings = []
+    
+    for edge in [e for e in bm.edges if abs((e.verts[0].co - e.verts[1].co).z) > 0.0001]:
+        # Loop through all vertical edges
+        if not edge.select:
+            edge.select = True
+            # Append all faces of edge's forward loop to list. Already processed edges / faces are selected.
+            forward_loop = edge.link_loops[0] if get_loop_direction(edge.link_loops[0]) > 0 else edge.link_loops[1]
+            loop_faces = select_loop_faces(forward_loop)
+            face_rings.append(loop_faces)
+    
+    return face_rings
+
+
+def uv_unwrap_walls(mesh_object):
+    """
+    Adds UV information to all walls (horizontal faces) of the specified mesh object.
+    Will group UVs together by continuous face loops (inner "rooms" or outer perimeter in case of walls).
+    This way, the amount of UV seams is minimized (one per continuous edge loop).
+    1.0 in UV space is mapped to 1.0 in 3D-Space.
+    """
+    me = mesh_object.data
+    bm = bmesh.new()
+    bm = bmesh.from_edit_mesh(me)
+    
+    uv_layer = bm.loops.layers.uv.active
+    if not uv_layer: uv_layer = bm.loops.layers.uv.new()
+    
+    face_rings = get_horizontal_face_rings(bm)
+    for face_ring in face_rings:
+        width_offset = 0.0
+        for face in face_ring:
+            # Determine length and height of face
+            face_width = face.edges[0].calc_length()
+            face_height = face.edges[1].calc_length()
+            for i in range(0, len(face.loops)):
+                # Calculate UV position for loop of each vertex on face
+                if i == 0:
+                    # Loop for bottom-left vertex
+                    uv = (width_offset, 0)
+                elif i == 1:
+                    # Loop for bottom-right vertex
+                    uv = (width_offset+face_width, 0)
+                elif i == 2:
+                    # Loop for top-right vertex
+                    uv = (width_offset+face_width, face_height)
+                elif i == 3:
+                    # Loop for top-left vertex
+                    uv = (width_offset, face_height)
+                
+                # Assign UV position to UV-map
+                face.loops[i][uv_layer].uv = uv
+            width_offset += face_width
+
 
 def main(wall_thickness=0.125, wall_height=2.5, fill_rims=True, context=bpy.context):
     """
@@ -249,8 +356,24 @@ def main(wall_thickness=0.125, wall_height=2.5, fill_rims=True, context=bpy.cont
     bpy.ops.mesh.remove_doubles(threshold=0.0001)
     # Extrude upwards
     bpy.ops.mesh.extrude_region_move(TRANSFORM_OT_translate={"value":(0, 0, wall_height)})
+    # Unwrap UV-Information for horizontal face loops (walls)
+    bpy.ops.mesh.select_all(action='DESELECT')
+    uv_unwrap_walls(bpy.context.edit_object)
     bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # Get or create default wall material
+    wall_material = bpy.data.materials.get("Wall Material")
+    if wall_material is None:
+        wall_material = bpy.data.materials.new(name="Wall Material")
+
+    # Assign material to new object
+    if new_obj.data.materials:
+        # Assign to 1st material slot
+        new_obj.data.materials[0] = wall_material
+    else:
+        # No slots
+        new_obj.data.materials.append(wall_material)
 
 
 class OBJECT_OT_create_walls(bpy.types.Operator):
@@ -284,6 +407,7 @@ class OBJECT_OT_create_walls(bpy.types.Operator):
             self.report({'WARNING'}, "Failed to construct walls for reference object. Make sure the reference object contains a mesh with a 2D wireframe outline of the wall layout.")
             return {'CANCELLED'}
 
+
 class OBJECT_MT_wallbuilder(bpy.types.Menu):
     """
     WallBuilder Menu
@@ -295,19 +419,23 @@ class OBJECT_MT_wallbuilder(bpy.types.Menu):
         layout = self.layout
         layout.operator(OBJECT_OT_create_walls.bl_idname)
 
+
 def menu_draw(self, context):
     self.layout.operator_context = 'INVOKE_REGION_WIN'
     self.layout.menu(OBJECT_MT_wallbuilder.bl_idname)
+
 
 def register():
     register_class(OBJECT_MT_wallbuilder)
     register_class(OBJECT_OT_create_walls)
     bpy.types.VIEW3D_MT_object.append(menu_draw)
     
+
 def unregister():
     bpy.types.VIEW3D_MT_object.remove(menu_draw)
     unregister_class(OBJECT_MT_wallbuilder)
     unregister_class(OBJECT_OT_create_walls)
+
 
 if __name__ == "__main__":
     # Unregister the operator class if it is already registered
