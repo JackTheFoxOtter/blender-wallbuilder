@@ -13,6 +13,15 @@ The reference object will get hidden, not deleted. This makes it easy to make ch
 
 Special thanks to Alex (@ByteArrayInputStream) for helping me out with the math for this one.
 
+## Changelog:
+### v1.0 (19.12.2020)
+* Initial release
+### v1.1 (20.12.2020)
+* Added automatic UV generation for walls
+* Added a default material for generated wall objects
+* Made all verts per corner have the same elevation (Z-Axis) as the corresponding vertex in the reference object
+
+
 ## Feel free to leave feedback and suggestions!
 If this helped you out in any way, shape or form, feel free to let me know!
 That's why I created this add-on in the end.
