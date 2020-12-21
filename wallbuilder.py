@@ -19,7 +19,7 @@ bl_info = {
     "name": "WallBuilder",
     "description": "Utilities to support wall and room building.",
     "author": "JackTheFoxOtter",
-    "version": (1, 1),
+    "version": (1, 2),
     "blender": (2, 90, 1),
     "location": "View3D > Object > WallBuilder",
     "warning": "",
@@ -37,6 +37,7 @@ from bpy.utils import register_class, unregister_class
 from bpy.props import FloatProperty, BoolProperty
 from functools import cmp_to_key
 from mathutils import Vector
+import colorsys
 import bmesh
 import math
 import bpy
@@ -281,7 +282,7 @@ def get_horizontal_face_rings(bm):
     return face_rings
 
 
-def uv_unwrap_walls(mesh_object):
+def uv_unwrap_walls(mesh_object, material_per_face_ring=False):
     """
     Adds UV information to all walls (horizontal faces) of the specified mesh object.
     Will group UVs together by continuous face loops (inner "rooms" or outer perimeter in case of walls).
@@ -296,9 +297,18 @@ def uv_unwrap_walls(mesh_object):
     if not uv_layer: uv_layer = bm.loops.layers.uv.new()
     
     face_rings = get_horizontal_face_rings(bm)
-    for face_ring in face_rings:
+    for i in range(len(face_rings)):
+        face_ring = face_rings[i]
+        
+        # Determine which material to use for the faces of this face ring
+        material_index = 0
+        if material_per_face_ring:
+            material_index = add_wall_material(i+1, me)
+            
         width_offset = 0.0
         for face in face_ring:
+            # Set material of face
+            face.material_index = material_index
             # Determine length and height of face
             face_width = face.edges[0].calc_length()
             face_height = face.edges[1].calc_length()
@@ -322,7 +332,71 @@ def uv_unwrap_walls(mesh_object):
             width_offset += face_width
 
 
-def main(wall_thickness=0.125, wall_height=2.5, fill_rims=True, context=bpy.context):
+def create_default_material(material_name="Default Material", hue=0.0, saturation=0.0):
+    """
+    Returns the default checkerboard material for walls.
+    Hue and Saturation parameters can be used to specif a color tint.
+    """
+    # Create the new material
+    material = bpy.data.materials.new(name=material_name)
+    material.use_nodes = True
+    
+    # Create nodes
+    nodes = material.node_tree.nodes
+    node_texture_coordinates = nodes.new("ShaderNodeTexCoord")
+    node_texture_coordinates.location = (-540, 0)
+    node_checkter_texture_1 = nodes.new("ShaderNodeTexChecker")
+    node_checkter_texture_1.location = (-360, 100)
+    node_checkter_texture_1.inputs[1].default_value = colorsys.hsv_to_rgb(hue, saturation, 0.75) + (1.0,)
+    node_checkter_texture_1.inputs[2].default_value = colorsys.hsv_to_rgb(hue, saturation, 0.5) + (1.0,)
+    node_checkter_texture_1.inputs[3].default_value = 6.0
+    node_checkter_texture_2 = nodes.new("ShaderNodeTexChecker")
+    node_checkter_texture_2.location = (-360, -100)
+    node_checkter_texture_2.inputs[1].default_value = (1, 1, 1, 1)
+    node_checkter_texture_2.inputs[2].default_value = (0, 0, 0, 1)
+    node_checkter_texture_2.inputs[3].default_value = 6.0
+    node_bump = nodes.new("ShaderNodeBump")
+    node_bump.location = (-180, -100)
+    node_bump.inputs[0].default_value = 0.5
+    node_principled = nodes.get("Principled BSDF")
+    
+    # Link nodes
+    links = material.node_tree.links
+    links.new(node_texture_coordinates.outputs[2], node_checkter_texture_1.inputs[0])
+    links.new(node_texture_coordinates.outputs[2], node_checkter_texture_2.inputs[0])
+    links.new(node_checkter_texture_2.outputs[1], node_bump.inputs[2])
+    links.new(node_checkter_texture_1.outputs[0], node_principled.inputs[0])
+    links.new(node_bump.outputs[0], node_principled.inputs[19])
+    
+    return material
+
+
+def add_wall_material(index, mesh):
+    """
+    Adds the wall material with the specified index to the mesh and returns it's index.
+    0 adds the base material with no tint, >= 1 adds indexed materials with hue tint.
+    """
+    if index == 0:
+        material_name = "Wall Material"
+        material_hue = 0.0
+        material_saturation = 0.0
+    else:
+        material_name = f"Wall Material {index}"
+        material_hue = index * (0.07) % 1
+        material_saturation = 0.5
+        
+    wall_material = bpy.data.materials.get(material_name)
+    if wall_material is None:
+        wall_material = create_default_material(material_name, material_hue, material_saturation)
+    
+    # Add material to mesh if not already existing
+    if (not mesh.materials) or (not material_name in mesh.materials):
+        mesh.materials.append(wall_material)
+    
+    return mesh.materials.find(material_name)
+
+
+def main(wall_thickness=0.125, wall_height=2.5, fill_rims=True, material_per_face_ring=False, context=bpy.context):
     """
     Creates a new object containing a mesh with wall geometry based on the currently selected object.
     The reference object should contain a mesh with a 2D wireframe representation of the wall layout, without faces.
@@ -348,6 +422,9 @@ def main(wall_thickness=0.125, wall_height=2.5, fill_rims=True, context=bpy.cont
     # Select new object
     context.view_layer.objects.active = new_obj
     new_obj.select_set(True)
+    
+    # Add default material to new object's mesh
+    add_wall_material(0, new_obj.data)
 
     # Edit new object
     bpy.ops.object.mode_set(mode='EDIT')
@@ -358,22 +435,9 @@ def main(wall_thickness=0.125, wall_height=2.5, fill_rims=True, context=bpy.cont
     bpy.ops.mesh.extrude_region_move(TRANSFORM_OT_translate={"value":(0, 0, wall_height)})
     # Unwrap UV-Information for horizontal face loops (walls)
     bpy.ops.mesh.select_all(action='DESELECT')
-    uv_unwrap_walls(bpy.context.edit_object)
+    uv_unwrap_walls(bpy.context.edit_object, material_per_face_ring)
     bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.object.mode_set(mode='OBJECT')
-    
-    # Get or create default wall material
-    wall_material = bpy.data.materials.get("Wall Material")
-    if wall_material is None:
-        wall_material = bpy.data.materials.new(name="Wall Material")
-
-    # Assign material to new object
-    if new_obj.data.materials:
-        # Assign to 1st material slot
-        new_obj.data.materials[0] = wall_material
-    else:
-        # No slots
-        new_obj.data.materials.append(wall_material)
 
 
 class OBJECT_OT_create_walls(bpy.types.Operator):
@@ -388,6 +452,7 @@ class OBJECT_OT_create_walls(bpy.types.Operator):
     wall_thickness: FloatProperty(name="Wall Thickness", default=0.25)
     wall_height: FloatProperty(name="Wall Height", default=2.5)
     fill_rims: BoolProperty(name="Fill Rims", default=True)
+    material_per_face_ring: BoolProperty(name="Material per face ring", default=False)
     
     @classmethod
     def poll(cls, context):
@@ -395,13 +460,25 @@ class OBJECT_OT_create_walls(bpy.types.Operator):
     
     def execute(self, context):
         # Execute main function
-        main(self.wall_thickness/2, self.wall_height, self.fill_rims, context=context)
+        main(
+            self.wall_thickness/2, 
+            self.wall_height, 
+            self.fill_rims, 
+            self.material_per_face_ring, 
+            context=context
+        )
         return {'FINISHED'}
     
     def invoke(self, context, event):
         try:
             # Execute main function
-            main(self.wall_thickness/2, self.wall_height, self.fill_rims, context=context)
+            main(
+                self.wall_thickness/2, 
+                self.wall_height, 
+                self.fill_rims, 
+                self.material_per_face_ring, 
+                context=context
+            )
             return {'FINISHED'}
         except Exception:
             self.report({'WARNING'}, "Failed to construct walls for reference object. Make sure the reference object contains a mesh with a 2D wireframe outline of the wall layout.")
